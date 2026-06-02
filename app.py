@@ -250,16 +250,19 @@ def admin_verses():
     title = st.text_input("Verse title (e.g. John 3:16)")
     body = st.text_area("Full verse text")
     if st.button("Post Verse"):
-        if title and body:
-            db_insert("content", {
-                "type": "bible_verse",
-                "title": title,
-                "body": body
-            })
+    if title and body:
+        result = db_insert("content", {
+            "type": "bible_verse",
+            "title": title,
+            "body": body
+        })
+        if result is not None:
             st.success("Verse posted!")
             st.rerun()
         else:
-            st.warning("Please fill in both fields.")
+            st.error("Failed to save. Check terminal for error details.")
+    else:
+        st.warning("Please fill in both fields.")
 
 def admin_quizzes():
     st.subheader("📝 Quizzes")
