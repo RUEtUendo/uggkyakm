@@ -127,9 +127,64 @@ def child_dashboard():
                 st.success("Answer submitted!")
 
 def parent_dashboard():
-    st.title("Parent Dashboard")
-    st.markdown(f"Logged in as: {st.session_state.name}")
-    st.info("Parent view coming shortly.")
+    st.title("👨‍👩‍👧 Parent Dashboard")
+    st.markdown(f"Welcome, {st.session_state.name}")
+    st.markdown("---")
+
+    # Get linked children
+    links = db_select("parent_child", {"parent_id": f"eq.{st.session_state.uid}"})
+
+    if not links:
+        st.warning("No children linked to your account. Contact admin.")
+        return
+
+    for link in links:
+        child_id = link["child_id"]
+
+        # Get child profile
+        profiles = db_select("Profiles", {"id": f"eq.{child_id}"})
+        if not profiles:
+            continue
+        child = profiles[0]
+
+        st.subheader(f"👦 {child['name']}")
+
+        # Get all submissions for this child
+        subs = db_select("submissions", {"child_id": f"eq.{child_id}"})
+
+        if not subs:
+            st.write("No activity yet.")
+        else:
+            images = [s for s in subs if s.get("file_type") == "image"]
+            voices = [s for s in subs if s.get("file_type") == "voice"]
+            quizzes = [s for s in subs if s.get("file_type") == "quiz"]
+
+            # Images tab
+            if images:
+                st.markdown(f"🖼️ **Images uploaded: {len(images)}**")
+                for img in images:
+                    if img.get("file_url"):
+                        st.image(img["file_url"], width=200)
+
+            # Voice notes tab
+            if voices:
+                st.markdown(f"🎤 **Voice notes: {len(voices)}**")
+                for v in voices:
+                    if v.get("file_url"):
+                        st.markdown(f"[▶ Listen to voice note]({v['file_url']})")
+
+            # Quiz answers tab
+            if quizzes:
+                st.markdown(f"📝 **Quiz answers: {len(quizzes)}**")
+                for q in quizzes:
+                    with st.expander(f"Answer submitted"):
+                        st.write(q.get("content", "No answer text"))
+                        if q.get("mark"):
+                            st.success(f"✅ Mark: {q['mark']}")
+                        else:
+                            st.warning("⏳ Not marked yet")
+
+        st.markdown("---")
 
 def admin_dashboard():
     st.title("⚙️ Admin Dashboard")
