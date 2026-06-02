@@ -6,7 +6,8 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 HEADERS = {
     "apikey": SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "Prefer": "return=representation"
 }
 
 def db_select(table, filters=None):
@@ -16,6 +17,9 @@ def db_select(table, filters=None):
         headers=HEADERS,
         params=params
     )
+    if res.status_code != 200:
+        print(f"SELECT ERROR on {table}: {res.status_code} {res.text}")
+        return []
     return res.json()
 
 def db_insert(table, data):
@@ -24,4 +28,18 @@ def db_insert(table, data):
         headers=HEADERS,
         json=data
     )
+    if res.status_code not in [200, 201]:
+        print(f"INSERT ERROR on {table}: {res.status_code} {res.text}")
+        return None
+    return res.json()
+
+def db_update(table, match_field, match_value, data):
+    res = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/{table}?{match_field}=eq.{match_value}",
+        headers=HEADERS,
+        json=data
+    )
+    if res.status_code not in [200, 204]:
+        print(f"UPDATE ERROR on {table}: {res.status_code} {res.text}")
+        return None
     return res.json()
