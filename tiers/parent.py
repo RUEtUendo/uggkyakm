@@ -67,4 +67,3 @@ def parent_dashboard():
                     st.warning("Not marked yet")
 
         st.markdown("---")
-      
