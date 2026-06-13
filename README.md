@@ -127,7 +127,7 @@ streamlit run app.py
 
 The app is deployed via Streamlit Community Cloud connected to this GitHub repository. Any push to the `main` branch automatically updates the live app.
 
-Live URL: *(to be added after deployment)*
+Live URL: https://uggkyakm-sipgc5xs3vhucmefqkndo6.streamlit.app/?uid=3fb9197c-2ca8-4cb9-b9f7-c989bead6ba8
 
 ---
 
@@ -139,22 +139,6 @@ Live URL: *(to be added after deployment)*
 
 ---
 
-## Development Progress
-
-| Day | Focus | Status |
-|-----|-------|--------|
-| Day 1 | Setup, Auth, Role-based Login | ✅ Complete |
-| Day 2 | Children's Tier | 🔄 In Progress |
-| Day 3 | Parent Tier | ⏳ Pending |
-| Day 4 | Admin Tier | ⏳ Pending |
-| Day 5 | Quiz System | ⏳ Pending |
-| Day 6 | File Uploads | ⏳ Pending |
-| Day 7 | Mobile Polish | ⏳ Pending |
-| Day 8 | Testing | ⏳ Pending |
-| Day 9 | Bug Fixes | ⏳ Pending |
-| Day 10 | Final Deployment | ⏳ Pending |
-
----
 
 ## Author
 
