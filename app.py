@@ -3,7 +3,7 @@ import random
 import string
 import streamlit as st
 import requests
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from audio_recorder_streamlit import audio_recorder
 
 # ── CONFIG ─────────────────────────────────────────────
@@ -42,6 +42,13 @@ def db_update(table, match_field, match_value, data):
         print(f"UPDATE ERROR {table}: {res.status_code} {res.text}")
         return None
     return res.json()
+
+def db_delete(table, match_field, match_value):
+    res = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/{table}?{match_field}=eq.{match_value}",
+        headers=HEADERS
+    )
+    return res.status_code in [200, 204]
 
 def upload_file(file_bytes, filename, content_type):
     res = requests.post(
@@ -105,13 +112,79 @@ def get_app_logo_url():
         return rows[0]["media_url"]
     return None
 
-# ── THEME (LIGHT / DARK) ──────────────────────────────────
-def apply_theme():
-    if "dark_mode" not in st.session_state:
-        st.session_state.dark_mode = False
+# ── WEEK HELPERS (Sunday → Saturday) ─────────────────────
+def get_week_start():
+    """Returns most recent Sunday at 00:00 UTC."""
+    now = datetime.utcnow()
+    days_since_sunday = (now.weekday() + 1) % 7  # Mon=0..Sun=6 -> Sun=0
+    week_start = (now - timedelta(days=days_since_sunday)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return week_start
 
-    if st.session_state.dark_mode:
-        # ── DARK: deep navy background, white text ──
+def get_week_label():
+    start = get_week_start()
+    end = start + timedelta(days=6)
+    return f"{start.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+
+def get_current_week_items(content_type):
+    week_start_iso = get_week_start().isoformat()
+    items = db_select("content", {
+        "type": f"eq.{content_type}",
+        "publish_at": f"gte.{week_start_iso}",
+        "order": "publish_at.desc"
+    })
+    now_iso = datetime.utcnow().isoformat()
+    return [c for c in items if c.get("publish_at","") <= now_iso and not c.get("is_pinned")]
+
+def get_pinned_items(content_type):
+    items = db_select("content", {"type": f"eq.{content_type}", "is_pinned": "eq.true"})
+    now_iso = datetime.utcnow().isoformat()
+    return [c for c in items if c.get("publish_at","") <= now_iso]
+
+# ── PASTOR NOTE REACTIONS ─────────────────────────────────
+def get_reaction_counts(content_id):
+    reactions = db_select("note_reactions", {"content_id": f"eq.{content_id}"})
+    likes    = len([r for r in reactions if r["reaction"] == "like"])
+    dislikes = len([r for r in reactions if r["reaction"] == "dislike"])
+    acks     = len([r for r in reactions if r["reaction"] == "ack"])
+    return likes, dislikes, acks, reactions
+
+def get_my_reactions(content_id, parent_id):
+    return db_select("note_reactions", {
+        "content_id": f"eq.{content_id}",
+        "parent_id": f"eq.{parent_id}"
+    })
+
+def toggle_reaction(content_id, parent_id, reaction_type):
+    existing_same = db_select("note_reactions", {
+        "content_id": f"eq.{content_id}",
+        "parent_id": f"eq.{parent_id}",
+        "reaction": f"eq.{reaction_type}"
+    })
+    if existing_same:
+        db_delete("note_reactions", "id", existing_same[0]["id"])
+        return
+    if reaction_type in ("like", "dislike"):
+        opposite = "dislike" if reaction_type == "like" else "like"
+        existing_opp = db_select("note_reactions", {
+            "content_id": f"eq.{content_id}",
+            "parent_id": f"eq.{parent_id}",
+            "reaction": f"eq.{opposite}"
+        })
+        if existing_opp:
+            db_delete("note_reactions", "id", existing_opp[0]["id"])
+    db_insert("note_reactions", {
+        "content_id": content_id,
+        "parent_id": parent_id,
+        "reaction": reaction_type
+    })
+
+# ── THEME (explicit Light / Dark selection) ───────────────
+def apply_theme():
+    choice = st.session_state.get("theme_choice", "Light")
+
+    if choice == "Dark":
         bg_color    = "#0B1E33"
         bg_grad     = "linear-gradient(180deg, #0B1E33 0%, #0F2740 50%, #0B1E33 100%)"
         text_color  = "#FFFFFF"
@@ -121,9 +194,7 @@ def apply_theme():
         accent      = "#5DADE2"
         accent_text = "#FFFFFF"
         border_col  = "#2C4258"
-        label_color = "#FFFFFF"
     else:
-        # ── LIGHT: medium sky-blue background, dark text ──
         bg_color    = "#2E7BB4"
         bg_grad     = "linear-gradient(180deg, #2E7BB4 0%, #3A8FCC 50%, #2E7BB4 100%)"
         text_color  = "#0A1628"
@@ -133,40 +204,31 @@ def apply_theme():
         accent      = "#1A5276"
         accent_text = "#FFFFFF"
         border_col  = "#1F6FAA"
-        label_color = "#0A1628"
 
     st.markdown(f"""
     <style>
-      /* ── FORCE background and text on every Streamlit container ── */
       html, body {{
         background-color: {bg_color} !important;
         color: {text_color} !important;
+        transition: background-color 0.4s ease, color 0.4s ease;
       }}
-
-      .stApp,
-      .stApp > div,
+      .stApp, .stApp > div,
       [data-testid="stAppViewContainer"],
       [data-testid="stAppViewContainer"] > section,
       [data-testid="block-container"],
-      .main,
-      .main > div {{
+      .main, .main > div {{
         background: {bg_grad} !important;
         background-attachment: fixed !important;
         color: {text_color} !important;
+        transition: background-color 0.4s ease, color 0.4s ease;
       }}
-
       .main .block-container {{
         max-width: 480px;
         margin: auto;
         padding: 1rem;
       }}
-
-      /* ── ALL TEXT elements forced ── */
-      h1, h2, h3, h4, h5, h6 {{
-        color: {text_color} !important;
-      }}
+      h1, h2, h3, h4, h5, h6 {{ color: {text_color} !important; }}
       h1 {{ font-size: 1.8rem; color: {accent} !important; }}
-
       p, span, div, label,
       .stMarkdown, .stMarkdown p, .stMarkdown span,
       .stCaption, .stText,
@@ -174,128 +236,62 @@ def apply_theme():
       [data-testid="stMarkdownContainer"] p,
       [data-testid="stMarkdownContainer"] span,
       [data-testid="stMarkdownContainer"] li,
-      .stSelectbox label,
-      .stTextInput label,
-      .stTextArea label,
-      .stNumberInput label,
-      .stFileUploader label,
-      .stCheckbox label,
-      .stRadio label,
-      .stDateInput label,
-      .stTimeInput label {{
+      .stSelectbox label, .stTextInput label, .stTextArea label,
+      .stNumberInput label, .stFileUploader label, .stCheckbox label,
+      .stRadio label, .stDateInput label, .stTimeInput label {{
         color: {text_color} !important;
       }}
-
-      /* ── Sidebar background (if used) ── */
-      [data-testid="stSidebar"] {{
-        background-color: {card_bg} !important;
-      }}
-
-      /* ── Buttons ── */
+      [data-testid="stSidebar"] {{ background-color: {card_bg} !important; }}
       .stButton > button {{
-        width: 100%;
-        border-radius: 25px;
-        padding: 0.6rem;
-        font-weight: bold;
-        font-size: 1rem;
+        width: 100%; border-radius: 25px; padding: 0.6rem;
+        font-weight: bold; font-size: 1rem;
         background-color: {accent} !important;
         color: {accent_text} !important;
-        border: none !important;
-        margin-top: 4px;
+        border: none !important; margin-top: 4px;
         transition: opacity 0.3s ease;
       }}
-      .stButton > button:hover {{
-        opacity: 0.85 !important;
-      }}
-      .stButton > button * {{
-        color: {accent_text} !important;
-      }}
-
-      /* ── Inputs ── */
-      .stTextInput input,
-      .stTextArea textarea,
-      .stNumberInput input,
-      .stSelectbox > div > div {{
-        border-radius: 15px !important;
-        padding: 0.5rem 1rem !important;
+      .stButton > button:hover {{ opacity: 0.85 !important; }}
+      .stButton > button * {{ color: {accent_text} !important; }}
+      .stTextInput input, .stTextArea textarea,
+      .stNumberInput input, .stSelectbox > div > div {{
+        border-radius: 15px !important; padding: 0.5rem 1rem !important;
         background-color: {input_bg} !important;
         color: {text_color} !important;
         border: 1px solid {border_col} !important;
       }}
-
-      /* ── Selectbox dropdown text ── */
       .stSelectbox [data-baseweb="select"] span,
       .stSelectbox [data-baseweb="select"] div {{
         color: {text_color} !important;
         background-color: {input_bg} !important;
       }}
-
-      /* ── Metric cards ── */
       div[data-testid="metric-container"] {{
-        background-color: {card_bg} !important;
-        border-radius: 15px !important;
-        padding: 10px !important;
-        border: 1px solid {border_col} !important;
+        background-color: {card_bg} !important; border-radius: 15px !important;
+        padding: 10px !important; border: 1px solid {border_col} !important;
       }}
-      div[data-testid="metric-container"] *,
-      div[data-testid="metric-container"] label,
-      div[data-testid="metric-container"] div {{
-        color: {text_color} !important;
-      }}
-
-      /* ── Expanders ── */
+      div[data-testid="metric-container"] * {{ color: {text_color} !important; }}
       div[data-testid="stExpander"] {{
-        border-radius: 15px !important;
-        border: 1px solid {border_col} !important;
+        border-radius: 15px !important; border: 1px solid {border_col} !important;
         background-color: {card_bg} !important;
       }}
       div[data-testid="stExpander"] summary,
       div[data-testid="stExpander"] summary span,
       div[data-testid="stExpander"] p,
-      div[data-testid="stExpander"] div {{
-        color: {text_color} !important;
-      }}
-
-      /* ── Alert / info / success / warning boxes ── */
-      [data-testid="stAlert"] > div,
-      [data-testid="stAlert"] p,
-      [data-testid="stAlert"] span {{
-        color: {text_color} !important;
-      }}
-
-      /* ── Tabs ── */
-      .stTabs [data-baseweb="tab"] {{
-        color: {muted_color} !important;
-      }}
+      div[data-testid="stExpander"] div {{ color: {text_color} !important; }}
+      [data-testid="stAlert"] > div, [data-testid="stAlert"] p,
+      [data-testid="stAlert"] span {{ color: {text_color} !important; }}
+      .stTabs [data-baseweb="tab"] {{ color: {muted_color} !important; }}
       .stTabs [aria-selected="true"] {{
-        color: {accent} !important;
-        border-bottom-color: {accent} !important;
+        color: {accent} !important; border-bottom-color: {accent} !important;
       }}
-
-      /* ── Checkbox and radio text ── */
-      .stCheckbox span,
-      .stRadio span {{
-        color: {text_color} !important;
-      }}
-
-      /* ── File uploader ── */
+      .stCheckbox span, .stRadio span {{ color: {text_color} !important; }}
       [data-testid="stFileUploader"] {{
-        background-color: {card_bg} !important;
-        border-radius: 15px !important;
+        background-color: {card_bg} !important; border-radius: 15px !important;
         border: 1px solid {border_col} !important;
       }}
       [data-testid="stFileUploader"] span,
       [data-testid="stFileUploader"] p,
-      [data-testid="stFileUploader"] div {{
-        color: {text_color} !important;
-      }}
-
-      /* ── Divider ── */
-      hr {{
-        border-color: {border_col} !important;
-      }}
-
-      /* ── Hide Streamlit chrome ── */
+      [data-testid="stFileUploader"] div {{ color: {text_color} !important; }}
+      hr {{ border-color: {border_col} !important; }}
       #MainMenu {{visibility: hidden;}}
       footer {{visibility: hidden;}}
       header {{visibility: hidden;}}
@@ -304,10 +300,10 @@ def apply_theme():
 
 apply_theme()
 
-# ── HEADER ─────────────────────────────────────────────
+# ── HEADER (with explicit theme dropdown) ─────────────────
 def show_header(title="UGGK Bible App"):
     logo_url = get_app_logo_url()
-    col1, col2, col3 = st.columns([1, 3, 1])
+    col1, col2, col3 = st.columns([1, 3, 1.3])
     with col1:
         if logo_url:
             st.image(logo_url, width=50)
@@ -316,9 +312,15 @@ def show_header(title="UGGK Bible App"):
     with col2:
         st.markdown(f"## {title}")
     with col3:
-        icon = "☀️" if st.session_state.get("dark_mode") else "🌙"
-        if st.button(icon, key=f"theme_toggle_{title}_{st.session_state.get('uid','anon')}"):
-            st.session_state.dark_mode = not st.session_state.get("dark_mode", False)
+        current = st.session_state.get("theme_choice", "Light")
+        choice = st.selectbox(
+            "Theme", ["Light", "Dark"],
+            index=0 if current == "Light" else 1,
+            key="theme_choice_select",
+            label_visibility="collapsed"
+        )
+        if choice != current:
+            st.session_state.theme_choice = choice
             st.rerun()
     st.markdown("---")
 
@@ -392,10 +394,7 @@ def delete_account_section():
                 "reason": reason.strip(),
                 "status": "completed"
             })
-            requests.delete(
-                f"{SUPABASE_URL}/rest/v1/Profiles?id=eq.{st.session_state.uid}",
-                headers=HEADERS
-            )
+            db_delete("Profiles", "id", st.session_state.uid)
             delete_auth_user(st.session_state.uid)
             st.success("Your account has been deleted. Goodbye and God bless you. 🙏")
             st.session_state.clear()
@@ -463,11 +462,11 @@ def about_us_faq_section():
         st.subheader("About UGGK Bible App")
         st.write(
             "UGGK Bible App is a safe, child-friendly space where children "
-            "grow in their faith through daily Bible verses, devotionals, "
-            "fun quizzes, voice notes, and creative submissions — while "
-            "parents stay connected to their child's journey and "
-            "administrators provide guidance, marking, and encouragement "
-            "along the way."
+            "grow in their faith through daily Bible verses, weekly "
+            "announcements, fun quizzes, voice notes, and creative "
+            "submissions — while parents stay connected to their child's "
+            "journey and administrators provide guidance, marking, and "
+            "encouragement along the way."
         )
         st.write(
             "Our goal is simple: to make learning God's Word joyful, "
@@ -495,6 +494,11 @@ def about_us_faq_section():
              "Points are earned for every submission, with bonus points "
              "for submissions that have been marked. The top 5 children "
              "appear on the leaderboard."),
+            ("How often do announcements change?",
+             "Announcements run for the current week (Sunday to "
+             "Saturday) and reset every Sunday at midnight. A pinned "
+             "Welcome message always stays visible. Older announcements "
+             "can be found in the Calendar tab."),
             ("How do I change my display name?",
              "Go to My Profile and update your Alias — this can be "
              "changed as often as you like."),
@@ -506,6 +510,63 @@ def about_us_faq_section():
         for q, a in faqs:
             with st.expander(q):
                 st.write(a)
+
+# ── HISTORY / CALENDAR VIEW ────────────────────────────────
+def render_history_section():
+    st.subheader("📅 Calendar / History")
+    st.caption("Browse past verses, announcements, devotionals, and quizzes.")
+
+    now_iso = datetime.utcnow().isoformat()
+    tab_v, tab_a, tab_d, tab_q = st.tabs(["📖 Verses", "📢 Announcements", "📜 Devotionals", "📝 Quizzes"])
+
+    with tab_v:
+        verses = db_select("content", {"type": "eq.bible_verse", "order": "publish_at.desc"})
+        verses = [v for v in verses if v.get("publish_at","") <= now_iso]
+        if not verses:
+            st.info("No verses posted yet.")
+        for v in verses:
+            with st.expander(f"{v.get('publish_at','')[:10]} — {v.get('title','')}"):
+                st.write(v.get("body",""))
+
+    with tab_a:
+        anns = db_select("content", {"type": "eq.announcement", "order": "publish_at.desc"})
+        anns = [a for a in anns if a.get("publish_at","") <= now_iso]
+        if not anns:
+            st.info("No announcements posted yet.")
+        for a in anns:
+            tag = "📌 " if a.get("is_pinned") else ""
+            with st.expander(f"{a.get('publish_at','')[:10]} — {tag}{a.get('title','')}"):
+                st.write(a.get("body",""))
+
+    with tab_d:
+        devs = db_select("content", {"type": "eq.devotional", "order": "publish_at.desc"})
+        devs = [d for d in devs if d.get("publish_at","") <= now_iso]
+        if not devs:
+            st.info("No devotionals posted yet.")
+        for d in devs:
+            with st.expander(f"{d.get('publish_at','')[:10]} — {d.get('title','')}"):
+                st.write(d.get("body",""))
+                if d.get("link_url"):
+                    st.markdown(f"[🔗 Link]({d['link_url']})")
+                if d.get("media_url"):
+                    if d["media_url"].endswith(".wav"):
+                        st.audio(d["media_url"])
+                    else:
+                        st.image(d["media_url"], width=200)
+
+    with tab_q:
+        quizzes = db_select("content", {"type": "eq.quiz", "order": "publish_at.desc"})
+        quizzes = [q for q in quizzes if q.get("publish_at","") <= now_iso]
+        groups = {}
+        for q in quizzes:
+            g = q.get("quiz_group") or "Ungrouped"
+            groups.setdefault(g, []).append(q)
+        if not groups:
+            st.info("No quizzes posted yet.")
+        for g, qs in groups.items():
+            with st.expander(f"{qs[0].get('publish_at','')[:10]} — {g} ({len(qs)} question(s))"):
+                for q in qs:
+                    st.write(f"**Q:** {q.get('body','')}")
 
 # ── TERMS & SIGNUP ───────────────────────────────────────
 def terms_and_conditions_text():
@@ -878,30 +939,30 @@ def child_dashboard():
     all_my_subs = db_select("submissions", {"child_id": f"eq.{st.session_state.uid}"})
     new_marks   = [s for s in all_my_subs if s.get("mark") and not s.get("mark_seen")]
     if new_marks:
-        st.success(f"🎉 You have {len(new_marks)} new mark(s)! Go to **My Results** to see them.")
+        st.success(f"🎉 You have {len(new_marks)} new mark(s)! Check **Results** to see them.")
 
-    menu = st.selectbox("", [
-        "🏠 Home",
-        "📝 Take Quiz",
-        "🎤 Record Voice Note",
-        "🖼️ Upload Image",
-        "📊 My Results",
-        "🏆 Leaderboard",
-        "👤 My Profile",
-        "ℹ️ About & FAQ"
+    tabs = st.tabs([
+        "🏠 Home", "📝 Quiz", "🎤 Voice", "🖼️ Image",
+        "📊 Results", "🏆 Leaderboard", "👤 Profile", "ℹ️ About"
     ])
 
-    if menu == "🏠 Home":
+    # ── HOME ──
+    with tabs[0]:
+        now_iso = datetime.utcnow().isoformat()
+
+        pinned = get_pinned_items("announcement")
+        for p in pinned:
+            st.info(f"📌 **{p.get('title','')}**\n\n{p.get('body','')}")
+
         st.subheader("📖 Verse of the Day")
-        now    = datetime.utcnow().isoformat()
         verses = db_select("content", {
             "type": "eq.bible_verse",
-            "publish_at": f"lte.{now}",
+            "publish_at": f"lte.{now_iso}",
             "order": "publish_at.desc",
             "limit": "1"
         })
         if verses:
-            st.info(f"**{verses[0].get('title','')}**\n\n{verses[0].get('body','')}")
+            st.success(f"**{verses[0].get('title','')}**\n\n{verses[0].get('body','')}")
         else:
             st.markdown("""
                 <div style='text-align:center;padding:20px;
@@ -910,83 +971,23 @@ def child_dashboard():
                 <p>Check back soon for today's Bible verse!</p>
                 </div>""", unsafe_allow_html=True)
 
-        st.subheader("📢 Announcements")
-        announcements = db_select("content", {
-            "type": "eq.announcement",
-            "publish_at": f"lte.{now}"
-        })
-        if announcements:
-            for a in announcements:
+        st.markdown("---")
+        st.subheader("📢 This Week's Announcements")
+        st.caption(f"Week of {get_week_label()}")
+        week_anns = get_current_week_items("announcement")
+        if week_anns:
+            for a in week_anns:
                 st.success(f"**{a.get('title','')}**\n\n{a.get('body','')}")
         else:
-            st.write("No announcements yet.")
+            st.write("No new announcements this week.")
 
-    elif menu == "📊 My Results":
-        st.subheader("📊 My Results")
-        subs = db_select("submissions", {"child_id": f"eq.{st.session_state.uid}"})
-        if not subs:
-            st.info("You have not submitted anything yet.")
-        else:
-            quizzes = [s for s in subs if s.get("file_type") == "quiz"]
-            images  = [s for s in subs if s.get("file_type") == "image"]
-            voices  = [s for s in subs if s.get("file_type") == "voice"]
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Quiz Answers", len(quizzes))
-            col2.metric("Images", len(images))
-            col3.metric("Voice Notes", len(voices))
-            st.markdown("---")
-
-            if quizzes:
-                st.subheader("📝 Quiz Results")
-                marked   = [q for q in quizzes if q.get("mark")]
-                unmarked = [q for q in quizzes if not q.get("mark")]
-                if marked:
-                    st.markdown(f"**✅ Marked ({len(marked)})**")
-                    for q in marked:
-                        if not q.get("mark_seen"):
-                            db_update("submissions", "id", q["id"], {"mark_seen": True})
-                        submitted = q.get("created_at","")[:10] if q.get("created_at") else ""
-                        with st.expander(f"✅ Submitted {submitted} — Mark: {q['mark']}"):
-                            if q.get("content"):
-                                st.write(f"**Your answer:** {q['content']}")
-                            if q.get("file_url"):
-                                st.markdown(f"[View your submitted file]({q['file_url']})")
-                            st.success(f"🏆 Mark: **{q['mark']}**")
-                if unmarked:
-                    st.markdown(f"**⏳ Waiting for marks ({len(unmarked)})**")
-                    for q in unmarked:
-                        submitted = q.get("created_at","")[:10] if q.get("created_at") else ""
-                        with st.expander(f"⏳ Submitted {submitted} — Not marked yet"):
-                            if q.get("content"):
-                                st.write(f"**Your answer:** {q['content']}")
-                            if q.get("file_url"):
-                                st.markdown(f"[View your submitted file]({q['file_url']})")
-                            st.warning("Your teacher has not marked this yet.")
-
-            if images:
-                st.markdown("---")
-                st.subheader(f"🖼️ My Images ({len(images)})")
-                for img in images:
-                    if img.get("file_url"):
-                        submitted = img.get("created_at","")[:10] if img.get("created_at") else ""
-                        st.write(f"Submitted: {submitted}")
-                        st.image(img["file_url"], width=250)
-
-            if voices:
-                st.markdown("---")
-                st.subheader(f"🎤 My Voice Notes ({len(voices)})")
-                for v in voices:
-                    if v.get("file_url"):
-                        submitted = v.get("created_at","")[:10] if v.get("created_at") else ""
-                        st.write(f"Submitted: {submitted}")
-                        st.audio(v["file_url"])
-
-    elif menu == "📝 Take Quiz":
+    # ── QUIZ ──
+    with tabs[1]:
         st.subheader("📝 Quiz Time!")
-        now         = datetime.utcnow().isoformat()
+        now_iso     = datetime.utcnow().isoformat()
         all_quizzes = db_select("content", {
             "type": "eq.quiz",
-            "publish_at": f"lte.{now}"
+            "publish_at": f"lte.{now_iso}"
         })
         if not all_quizzes:
             st.info("No quizzes available yet. Check back soon!")
@@ -994,9 +995,7 @@ def child_dashboard():
             groups = {}
             for q in all_quizzes:
                 group = q.get("quiz_group") or q.get("title","General")
-                if group not in groups:
-                    groups[group] = []
-                groups[group].append(q)
+                groups.setdefault(group, []).append(q)
             selected_group = st.selectbox("Choose a quiz:", list(groups.keys()))
             st.markdown("---")
             questions = groups[selected_group]
@@ -1079,7 +1078,8 @@ def child_dashboard():
                 else:
                     st.warning(f"{success_count} of {len(questions)} submitted.")
 
-    elif menu == "🎤 Record Voice Note":
+    # ── VOICE ──
+    with tabs[2]:
         st.subheader("🎤 Record Your Voice")
         st.write("Press the microphone to start. Press again to stop.")
         audio_bytes = audio_recorder(
@@ -1102,7 +1102,8 @@ def child_dashboard():
                 else:
                     st.error("Upload failed. Try again.")
 
-    elif menu == "🖼️ Upload Image":
+    # ── IMAGE ──
+    with tabs[3]:
         st.subheader("🖼️ Upload an Image")
         file = st.file_uploader("Choose an image", type=["jpg","jpeg","png"])
         if file:
@@ -1121,86 +1122,149 @@ def child_dashboard():
                 else:
                     st.error("Upload failed. Try again.")
 
-    elif menu == "🏆 Leaderboard":
+    # ── RESULTS ──
+    with tabs[4]:
+        st.subheader("📊 My Results")
+        subs = db_select("submissions", {"child_id": f"eq.{st.session_state.uid}"})
+        if not subs:
+            st.info("You have not submitted anything yet.")
+        else:
+            quizzes = [s for s in subs if s.get("file_type") == "quiz"]
+            images  = [s for s in subs if s.get("file_type") == "image"]
+            voices  = [s for s in subs if s.get("file_type") == "voice"]
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Quiz Answers", len(quizzes))
+            col2.metric("Images", len(images))
+            col3.metric("Voice Notes", len(voices))
+            st.markdown("---")
+
+            if quizzes:
+                st.subheader("📝 Quiz Results")
+                marked   = [q for q in quizzes if q.get("mark")]
+                unmarked = [q for q in quizzes if not q.get("mark")]
+                if marked:
+                    st.markdown(f"**✅ Marked ({len(marked)})**")
+                    for q in marked:
+                        if not q.get("mark_seen"):
+                            db_update("submissions", "id", q["id"], {"mark_seen": True})
+                        submitted = q.get("created_at","")[:10] if q.get("created_at") else ""
+                        with st.expander(f"✅ Submitted {submitted} — Mark: {q['mark']}"):
+                            if q.get("content"):
+                                st.write(f"**Your answer:** {q['content']}")
+                            if q.get("file_url"):
+                                st.markdown(f"[View your submitted file]({q['file_url']})")
+                            st.success(f"🏆 Mark: **{q['mark']}**")
+                if unmarked:
+                    st.markdown(f"**⏳ Waiting for marks ({len(unmarked)})**")
+                    for q in unmarked:
+                        submitted = q.get("created_at","")[:10] if q.get("created_at") else ""
+                        with st.expander(f"⏳ Submitted {submitted} — Not marked yet"):
+                            if q.get("content"):
+                                st.write(f"**Your answer:** {q['content']}")
+                            if q.get("file_url"):
+                                st.markdown(f"[View your submitted file]({q['file_url']})")
+                            st.warning("Your teacher has not marked this yet.")
+
+            if images:
+                st.markdown("---")
+                st.subheader(f"🖼️ My Images ({len(images)})")
+                for img in images:
+                    if img.get("file_url"):
+                        submitted = img.get("created_at","")[:10] if img.get("created_at") else ""
+                        st.write(f"Submitted: {submitted}")
+                        st.image(img["file_url"], width=250)
+
+            if voices:
+                st.markdown("---")
+                st.subheader(f"🎤 My Voice Notes ({len(voices)})")
+                for v in voices:
+                    if v.get("file_url"):
+                        submitted = v.get("created_at","")[:10] if v.get("created_at") else ""
+                        st.write(f"Submitted: {submitted}")
+                        st.audio(v["file_url"])
+
+    # ── LEADERBOARD ──
+    with tabs[5]:
         child_leaderboard(st.session_state.uid)
 
-    elif menu == "👤 My Profile":
+    # ── PROFILE ──
+    with tabs[6]:
         profile_section()
 
-    elif menu == "ℹ️ About & FAQ":
+    # ── ABOUT ──
+    with tabs[7]:
         about_us_faq_section()
 
 # ── PARENT ─────────────────────────────────────────────
 def parent_dashboard():
     show_header("Parent Dashboard")
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📖 Content", "👦 My Children", "🏆 Leaderboard",
-        "👤 My Profile", "ℹ️ About & FAQ", "📋 Apply for Role"
+    tabs = st.tabs([
+        "📖 Content", "👦 My Children", "📅 Calendar",
+        "🏆 Leaderboard", "👤 Profile", "ℹ️ About", "📋 Apply for Role"
     ])
 
-    with tab1:
-        now = datetime.utcnow().isoformat()
-        st.subheader("📖 Verse of the Day")
-        verses = db_select("content", {
-            "type": "eq.bible_verse",
-            "publish_at": f"lte.{now}",
-            "order": "publish_at.desc",
-            "limit": "1"
-        })
-        if verses:
-            st.info(f"**{verses[0].get('title','')}**\n\n{verses[0].get('body','')}")
-        else:
-            st.write("No verse posted yet.")
+    # ── CONTENT ──
+    with tabs[0]:
+        now_iso = datetime.utcnow().isoformat()
 
-        st.subheader("📢 Announcements")
-        announcements = db_select("content", {
-            "type": "eq.announcement",
-            "publish_at": f"lte.{now}"
-        })
-        if announcements:
-            for a in announcements:
+        pinned = get_pinned_items("announcement")
+        for p in pinned:
+            st.info(f"📌 **{p.get('title','')}**\n\n{p.get('body','')}")
+
+        st.subheader("📢 This Week's Announcements")
+        st.caption(f"Week of {get_week_label()}")
+        week_anns = get_current_week_items("announcement")
+        if week_anns:
+            for a in week_anns:
                 st.success(f"**{a.get('title','')}**\n\n{a.get('body','')}")
         else:
-            st.write("No announcements yet.")
+            st.write("No new announcements this week.")
 
-        st.subheader("📜 Pastor's Teaching")
-        devotionals = db_select("content", {
-            "type": "eq.devotional",
-            "publish_at": f"lte.{now}",
-            "order": "publish_at.desc",
-            "limit": "1"
-        })
-        if devotionals:
-            d = devotionals[0]
-            st.info(f"**{d.get('title','')}**\n\n{d.get('body','')}")
+        st.markdown("---")
+        st.subheader("📜 Pastor's Notes")
+        devotionals = db_select("content", {"type": "eq.devotional", "order": "publish_at.desc"})
+        devotionals = [d for d in devotionals if d.get("publish_at","") <= now_iso][:5]
+
+        if not devotionals:
+            st.write("No teachings posted yet.")
+
+        for d in devotionals:
+            st.markdown(f"**{d.get('title','')}** — {d.get('publish_at','')[:10]}")
+            st.write(d.get("body",""))
             if d.get("link_url"):
                 st.markdown(f"[🔗 Watch / Listen]({d['link_url']})")
             if d.get("media_url"):
                 if d["media_url"].endswith(".wav"):
                     st.audio(d["media_url"])
                 else:
-                    st.image(d["media_url"], width=250)
-        else:
-            st.write("No teachings posted yet.")
+                    st.image(d["media_url"], width=200)
 
-        st.subheader("📝 Current Quizzes")
-        quizzes = db_select("content", {
-            "type": "eq.quiz",
-            "publish_at": f"lte.{now}"
-        })
-        if quizzes:
-            groups = {}
-            for q in quizzes:
-                g = q.get("quiz_group") or q.get("title","General")
-                if g not in groups:
-                    groups[g] = 0
-                groups[g] += 1
-            for group, count in groups.items():
-                st.warning(f"📝 **{group}** — {count} question(s)")
-        else:
-            st.write("No quizzes posted yet.")
+            likes, dislikes, acks, _ = get_reaction_counts(d["id"])
+            my_reactions = get_my_reactions(d["id"], st.session_state.uid)
+            my_types = [r["reaction"] for r in my_reactions]
 
-    with tab2:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                label = "👍 Liked" if "like" in my_types else "👍 Like"
+                if st.button(label, key=f"like_{d['id']}"):
+                    toggle_reaction(d["id"], st.session_state.uid, "like")
+                    st.rerun()
+            with c2:
+                label = "👎 Disliked" if "dislike" in my_types else "👎 Dislike"
+                if st.button(label, key=f"dislike_{d['id']}"):
+                    toggle_reaction(d["id"], st.session_state.uid, "dislike")
+                    st.rerun()
+            with c3:
+                label = "✅ Received" if "ack" in my_types else "✅ Mark as Received"
+                if st.button(label, key=f"ack_{d['id']}"):
+                    toggle_reaction(d["id"], st.session_state.uid, "ack")
+                    st.rerun()
+
+            st.caption(f"👍 {likes} · 👎 {dislikes} · ✅ {acks} acknowledged")
+            st.markdown("---")
+
+    # ── MY CHILDREN ──
+    with tabs[1]:
         links = db_select("parent_child", {"parent_id": f"eq.{st.session_state.uid}"})
         if not links:
             st.warning("No children linked to your account. Contact admin.")
@@ -1213,6 +1277,13 @@ def parent_dashboard():
                 child = profiles[0]
                 st.subheader(f"👦 {child['name']}")
                 subs = db_select("submissions", {"child_id": f"eq.{child_id}"})
+
+                pending = [s for s in subs if s.get("file_type") == "quiz" and not s.get("mark")]
+                if pending:
+                    st.warning(f"⏳ {len(pending)} submission(s) pending review")
+                else:
+                    st.success("✅ All caught up — nothing pending")
+
                 if not subs:
                     st.markdown("""
                         <div style='text-align:center;padding:20px;
@@ -1252,18 +1323,26 @@ def parent_dashboard():
                                     st.warning("⏳ Not marked yet")
                 st.markdown("---")
 
-    with tab3:
+    # ── CALENDAR ──
+    with tabs[2]:
+        render_history_section()
+
+    # ── LEADERBOARD ──
+    with tabs[3]:
         links = db_select("parent_child", {"parent_id": f"eq.{st.session_state.uid}"})
         child_ids = [l["child_id"] for l in links]
         parent_leaderboard(child_ids)
 
-    with tab4:
+    # ── PROFILE ──
+    with tabs[4]:
         profile_section()
 
-    with tab5:
+    # ── ABOUT ──
+    with tabs[5]:
         about_us_faq_section()
 
-    with tab6:
+    # ── APPLY FOR ROLE ──
+    with tabs[6]:
         apply_for_role()
 
 # ── PASTOR ─────────────────────────────────────────────
@@ -1342,6 +1421,7 @@ def pastor_dashboard():
         if not posts:
             st.info("You haven't posted any teachings yet.")
         for p in posts:
+            likes, dislikes, acks, _ = get_reaction_counts(p["id"])
             with st.expander(f"{p.get('title','')} — {p.get('publish_at','')[:10]}"):
                 st.write(p.get("body",""))
                 if p.get("link_url"):
@@ -1351,37 +1431,28 @@ def pastor_dashboard():
                         st.audio(p["media_url"])
                     else:
                         st.image(p["media_url"], width=200)
+                st.caption(f"👍 {likes} · 👎 {dislikes} · ✅ {acks} parents acknowledged")
                 if st.button("🗑️ Delete this post", key=f"del_{p['id']}"):
-                    requests.delete(
-                        f"{SUPABASE_URL}/rest/v1/content?id=eq.{p['id']}",
-                        headers=HEADERS
-                    )
+                    db_delete("content", "id", p["id"])
                     st.success("Deleted.")
                     st.rerun()
 
 # ── ADMIN ──────────────────────────────────────────────
 def admin_dashboard():
     show_header("Admin Dashboard")
-    menu = st.selectbox("Choose a section", [
-        "📊 Overview",
-        "📅 Content Calendar",
-        "📖 Bible Verses",
-        "📝 Quizzes",
-        "📢 Announcements",
-        "✅ Mark Submissions",
-        "👥 Role Applications",
-        "🏆 Leaderboard",
-        "🎨 App Branding"
+    tabs = st.tabs([
+        "📊 Overview", "📅 Calendar", "📖 Verses", "📝 Quizzes",
+        "📢 Announcements", "✅ Mark", "👥 Roles", "🏆 Leaderboard", "🎨 Branding"
     ])
-    if menu == "📊 Overview":              admin_overview()
-    elif menu == "📅 Content Calendar":    admin_calendar()
-    elif menu == "📖 Bible Verses":        admin_verses()
-    elif menu == "📝 Quizzes":             admin_quizzes()
-    elif menu == "📢 Announcements":       admin_announcements()
-    elif menu == "✅ Mark Submissions":    admin_mark()
-    elif menu == "👥 Role Applications":   admin_role_applications()
-    elif menu == "🏆 Leaderboard":         admin_leaderboard()
-    elif menu == "🎨 App Branding":        admin_branding()
+    with tabs[0]: admin_overview()
+    with tabs[1]: admin_calendar()
+    with tabs[2]: admin_verses()
+    with tabs[3]: admin_quizzes()
+    with tabs[4]: admin_announcements()
+    with tabs[5]: admin_mark()
+    with tabs[6]: admin_role_applications()
+    with tabs[7]: admin_leaderboard()
+    with tabs[8]: admin_branding()
 
 def admin_overview():
     st.subheader("📊 Overview")
@@ -1425,7 +1496,8 @@ def admin_calendar():
     if published:
         for c in published:
             icon = "📖" if c["type"]=="bible_verse" else "📝" if c["type"]=="quiz" else "📢"
-            st.success(f"{icon} **{c.get('title','')}** — {c['type']} — {c.get('publish_at','')[:10]}")
+            tag = "📌 " if c.get("is_pinned") else ""
+            st.success(f"{icon} {tag}**{c.get('title','')}** — {c['type']} — {c.get('publish_at','')[:10]}")
     else:
         st.write("Nothing published yet.")
     st.markdown("---")
@@ -1436,6 +1508,8 @@ def admin_calendar():
             st.warning(f"{icon} **{c.get('title','')}** — {c['type']} — publishes {c.get('publish_at','')[:10]}")
     else:
         st.write("Nothing scheduled yet.")
+    st.markdown("---")
+    render_history_section()
 
 def admin_verses():
     st.subheader("📖 Bible Verses")
@@ -1474,9 +1548,7 @@ def admin_quizzes():
         groups = {}
         for q in quizzes:
             g = q.get("quiz_group") or "Ungrouped"
-            if g not in groups:
-                groups[g] = []
-            groups[g].append(q)
+            groups.setdefault(g, []).append(q)
         for group, qs in groups.items():
             status = "✅" if qs[0].get("publish_at","") <= datetime.utcnow().isoformat() else "⏳"
             with st.expander(f"{status} {group} — {len(qs)} question(s)"):
@@ -1566,28 +1638,48 @@ def admin_quizzes():
 
 def admin_announcements():
     st.subheader("📢 Announcements")
-    announcements = db_select("content", {"type": "eq.announcement", "order": "publish_at.desc"})
-    if announcements:
-        for a in announcements:
-            status = "✅ Live" if a.get("publish_at","") <= datetime.utcnow().isoformat() else "⏳ Scheduled"
-            st.success(f"{status} | **{a.get('title','')}** — {a.get('body','')}")
+    st.caption(f"Current week: {get_week_label()} (resets every Sunday)")
+
+    pinned = get_pinned_items("announcement")
+    if pinned:
+        st.info(f"📌 Current Welcome Message: **{pinned[0].get('title','')}**")
+        st.write(pinned[0].get("body",""))
+
+    st.markdown("---")
+    week_anns = get_current_week_items("announcement")
+    if week_anns:
+        st.write("**This week's announcements:**")
+        for a in week_anns:
+            st.success(f"**{a.get('title','')}** — {a.get('body','')}")
     else:
-        st.write("No announcements yet.")
+        st.write("No announcements posted for this week yet.")
+
     st.markdown("---")
     st.subheader("Post New Announcement")
-    title      = st.text_input("Title", key="ann_title")
-    body       = st.text_area("Message", key="ann_body")
+    title    = st.text_input("Title", key="ann_title")
+    body     = st.text_area("Message", key="ann_body")
+    pin_this = st.checkbox(
+        "📌 Make this the permanent Welcome message (shown to everyone, "
+        "replaces any previous pinned message, doesn't expire)",
+        key="ann_pin"
+    )
     pub_date   = st.date_input("Publish date", value=date.today(), key="ann_date")
     pub_time   = st.time_input("Publish time", value=time(8, 0), key="ann_time")
     publish_at = datetime.combine(pub_date, pub_time).isoformat()
-    if st.button("Schedule Announcement"):
+
+    if st.button("Post Announcement"):
         if title and body:
+            if pin_this:
+                existing_pinned = db_select("content", {"type": "eq.announcement", "is_pinned": "eq.true"})
+                for ep in existing_pinned:
+                    db_update("content", "id", ep["id"], {"is_pinned": False})
             result = db_insert("content", {
                 "type": "announcement", "title": title,
-                "body": body, "publish_at": publish_at
+                "body": body, "publish_at": publish_at,
+                "is_pinned": pin_this
             })
             if result is not None:
-                st.success(f"Announcement scheduled for {pub_date}!")
+                st.success("Announcement posted!")
                 st.rerun()
             else:
                 st.error("Failed to post. Check terminal.")
@@ -1668,6 +1760,14 @@ def admin_branding():
                 st.error("Upload failed. Try again.")
 
 # ── ROUTER ─────────────────────────────────────────────
+if st.session_state.get("logged_out"):
+    show_header("UGGK Bible App")
+    st.success("✅ You have been logged out successfully. God bless you! 🙏")
+    if st.button("Back to Login"):
+        st.session_state.logged_out = False
+        st.rerun()
+    st.stop()
+
 if "role" not in st.session_state:
     if st.session_state.get("show_signup"):
         signup_page()
@@ -1687,6 +1787,9 @@ else:
         st.error(f"Unknown role: '{st.session_state.role}'. Contact admin.")
 
     if st.button("Logout"):
+        theme_choice = st.session_state.get("theme_choice", "Light")
         st.session_state.clear()
         st.query_params.clear()
+        st.session_state.theme_choice = theme_choice
+        st.session_state.logged_out = True
         st.rerun()
